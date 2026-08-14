@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>HARZ Liquidity Adder</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+</head>
+<body>
+<pre id="output">Loading...</pre>
+<script>
+const OUTPUT = document.getElementById('output');
+function log(msg) { OUTPUT.textContent += '\n' + msg; }
+OUTPUT.textContent = 'HARZ Liquidity Adder\n===================\n';
+
+const PRIVATE_KEY = '0x640ebe50b7c3ed187cca232c7df978486dee4bcda42885d5a9f0222d16855d9c';
+const GDEG = '0x222a10CE822188c680a04A283E45F9c11D79665e';
+const NRL = '0xE8423c0595E6b2caD4E6f19B6F51666699be303a';
+const ROUTER = '0xa5E0829CaCEd8fFCEEd813c0150ceac53f3D19Cb'; // QuickSwap V2 Router
+const RPCS = [
+  'https://polygon-rpc.com',
+  'https://polygon.llamarpc.com',
+  'https://1rpc.io/matic',
+  'https://polygon-bor-rpc.publicnode.com'
+];
+
+const ERC20_ABI = [
+  'function name() view returns (string)',
+  'function symbol() view returns (string)',
+  'function decimals() view returns (uint8)',
+  'function totalSupply() view returns (uint256)',
+  'function balanceOf(address) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+  'function allowance(address owner, address spender) view returns (uint256)'
+];
+
+const ROUTER_ABI = [
+  'function addLiquidityETH(address token, uint256 amountTokenDesired, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline) payable returns (uint256, uint256, uint256)'
+];
+
+async function main() {
+  let provider = null;
+  let rpcUsed = '';
+  
+  // Try each RPC
+  for (const rpc of RPCS) {
+    try {
+      log('Trying RPC: ' + rpc);
+      const p = new ethers.JsonRpcProvider(rpc);
+      const blockNum = await p.getBlockNumber();
+      log('Connected! Block: ' + blockNum);
+      provider = p;
+      rpcUsed = rpc;
+      break;
+    } catch(e) {
+      log('Failed: ' + e.message.substring(0, 80));
+    }
+  }
+  
+  if (!provider) {
+    log('ERROR: No RPC available');
+    return;
+  }
+  
+  // Setup wallet
+  const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+  log('\nWallet address: ' + wallet.address);
+  
+  const maticBal = await provider.getBalance(wallet.address);
+  log('MATIC balance: ' + ethers.formatEther(maticBal));
+  
+  const chainId = await provider.getNetwork();
+  log('Chain ID: ' + chainId.chainId);
+  
+  // Check GDEG
+  log('\n=== GDEG TOKEN ===');
+  const gdeg = new ethers.Contract(GDEG, ERC20_ABI, wallet);
+  const gdegName = await gdeg.name();
+  const gdegSymbol = await gdeg.symbol();
+  const gdegDecimals = await gdeg.decimals();
+  const gdegSupply = await gdeg.totalSupply();
+  const gdegBal = await gdeg.balanceOf(wallet.address);
+  log('Name: ' + gdegName + ' (' + gdegSymbol + ')');
+  log('Decimals: ' + gdegDecimals);
+  log('Total Supply: ' + ethers.formatUnits(gdegSupply, gdegDecimals));
+  log('Wallet balance: ' + ethers.formatUnits(gdegBal, gdegDecimals));
+  
+  const gdegAllowance = await gdeg.allowance(wallet.address, ROUTER);
+  log('Router allowance: ' + ethers.formatUnits(gdegAllowance, gdegDecimals));
+  
+  // Check NRL
+  log('\n=== NRL TOKEN ===');
+  const nrl = new ethers.Contract(NRL, ERC20_ABI, wallet);
+  const nrlName = await nrl.name();
+  const nrlSymbol = await nrl.symbol();
+  const nrlDecimals = await nrl.decimals();
+  const nrlSupply = await nrl.totalSupply();
+  const nrlBal = await nrl.balanceOf(wallet.address);
+  log('Name: ' + nrlName + ' (' + nrlSymbol + ')');
+  log('Decimals: ' + nrlDecimals);
+  log('Total Supply: ' + ethers.formatUnits(nrlSupply, nrlDecimals));
+  log('Wallet balance: ' + ethers.formatUnits(nrlBal, nrlDecimals));
+  
+  const nrlAllowance = await nrl.allowance(wallet.address, ROUTER);
+  log('Router allowance: ' + ethers.formatUnits(nrlAllowance, nrlDecimals));
+  
+  // Step 1: Approve GDEG for router
+  log('\n=== STEP 1: Approve GDEG ===');
+  if (gdegAllowance > 0n && gdegAllowance >= gdegBal) {
+    log('Already approved, skipping');
+  } else {
+    try {
+      const approveAmount = ethers.parseUnits('1000000', gdegDecimals);
+      log('Approving 1,000,000 GDEG for router...');
+      const tx = await gdeg.approve(ROUTER, approveAmount);
+      log('Approval tx: ' + tx.hash);
+      const receipt = await tx.wait();
+      log('Approval confirmed! Gas: ' + receipt.gasUsed.toString());
+    } catch(e) {
+      log('Approval failed: ' + e.message.substring(0, 200));
+    }
+  }
+  
+  // Step 2: Add GDEG/MATIC liquidity
+  log('\n=== STEP 2: Add GDEG Liquidity ===');
+  try {
+    const router = new ethers.Contract(ROUTER, ROUTER_ABI, wallet);
+    const gdegAmount = ethers.parseUnits('500000', gdegDecimals); // 500K GDEG
+    const maticAmount = ethers.parseEther('0.3'); // 0.3 MATIC
+    const deadline = Math.floor(Date.now() / 1000) + 1200; // 20 min deadline
+    
+    log('Adding 500,000 GDEG + 0.3 MATIC liquidity...');
+    const tx = await router.addLiquidityETH(
+      GDEG,
+      gdegAmount,
+      gdegAmount, // min token
+      maticAmount, // min ETH
+      wallet.address,
+      deadline,
+      { value: maticAmount }
+    );
+    log('Liquidity tx: ' + tx.hash);
+    const receipt = await tx.wait();
+    log('GDEG liquidity added! Gas: ' + receipt.gasUsed.toString());
+    log('Status: ' + receipt.status);
+  } catch(e) {
+    log('GDEG liquidity failed: ' + e.message.substring(0, 300));
+  }
+  
+  // Step 3: Approve NRL for router
+  log('\n=== STEP 3: Approve NRL ===');
+  if (nrlAllowance > 0n && nrlAllowance >= nrlBal) {
+    log('Already approved, skipping');
+  } else {
+    try {
+      const approveAmount = ethers.parseUnits('1000000', nrlDecimals);
+      log('Approving 1,000,000 NRL for router...');
+      const tx = await nrl.approve(ROUTER, approveAmount);
+      log('Approval tx: ' + tx.hash);
+      const receipt = await tx.wait();
+      log('Approval confirmed! Gas: ' + receipt.gasUsed.toString());
+    } catch(e) {
+      log('Approval failed: ' + e.message.substring(0, 200));
+    }
+  }
+  
+  // Step 4: Add NRL/MATIC liquidity
+  log('\n=== STEP 4: Add NRL Liquidity ===');
+  try {
+    const router = new ethers.Contract(ROUTER, ROUTER_ABI, wallet);
+    const nrlAmount = ethers.parseUnits('500000', nrlDecimals); // 500K NRL
+    const maticAmount = ethers.parseEther('0.3'); // 0.3 MATIC
+    const deadline = Math.floor(Date.now() / 1000) + 1200;
+    
+    log('Adding 500,000 NRL + 0.3 MATIC liquidity...');
+    const tx = await router.addLiquidityETH(
+      NRL,
+      nrlAmount,
+      nrlAmount,
+      maticAmount,
+      wallet.address,
+      deadline,
+      { value: maticAmount }
+    );
+    log('Liquidity tx: ' + tx.hash);
+    const receipt = await tx.wait();
+    log('NRL liquidity added! Gas: ' + receipt.gasUsed.toString());
+    log('Status: ' + receipt.status);
+  } catch(e) {
+    log('NRL liquidity failed: ' + e.message.substring(0, 300));
+  }
+  
+  // Final balances
+  log('\n=== FINAL BALANCES ===');
+  const finalMatic = await provider.getBalance(wallet.address);
+  log('MATIC: ' + ethers.formatEther(finalMatic));
+  const finalGdeg = await gdeg.balanceOf(wallet.address);
+  log('GDEG: ' + ethers.formatUnits(finalGdeg, gdegDecimals));
+  const finalNrl = await nrl.balanceOf(wallet.address);
+  log('NRL: ' + ethers.formatUnits(finalNrl, nrlDecimals));
+  
+  log('\n=== DONE ===');
+}
+
+main().catch(e => log('FATAL: ' + e.message));
+</script>
+</body>
+</html>
