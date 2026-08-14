@@ -9,34 +9,47 @@
 <script>
 const OUTPUT = document.getElementById('output');
 function log(msg) { OUTPUT.textContent += '\n' + msg; }
-OUTPUT.textContent = 'HARZ Liquidity Adder v3\n=======================\n';
+OUTPUT.textContent = 'HARZ Liquidity Adder v4\n=======================\n';
 
-// Use ethers.getAddress() to get proper checksummed addresses
-const PRIVATE_KEY = '0x640ebe50b7c3ed187cca232c7df978486dee4bcda42885d5a9f0222d16855d9c';
-const GDEG = ethers.getAddress('0x222a10CE822188c680a04A283E45F9c11D79665e');
-const NRL = ethers.getAddress('0xE8423c0595E6b2caD4E6f19B6F51666699be303a');
-const ROUTER = ethers.getAddress('0xa5E0829CaCEd8fFCEEd813c0150ceac53f3D19Cb');
-const RPCS = ['https://1rpc.io/matic', 'https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'];
-
-log('GDEG: ' + GDEG);
-log('NRL: ' + NRL);
-log('Router: ' + ROUTER);
-
-const ERC20_ABI = [
-  'function balanceOf(address) view returns (uint256)',
-  'function approve(address spender, uint256 amount) returns (bool)',
-  'function allowance(address owner, address spender) view returns (uint256)',
-  'function totalSupply() view returns (uint256)'
-];
-const ROUTER_ABI = [
-  'function addLiquidityETH(address token, uint256 amountTokenDesired, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline) payable returns (uint256, uint256, uint256)'
-];
-
-async function safeCall(fn, label) {
-  try { return await fn(); } catch(e) { log('  ' + label + ' failed: ' + e.message.substring(0,120)); return null; }
+// Wait for ethers to load
+function start() {
+  if (typeof ethers === 'undefined') {
+    log('ethers not loaded yet, retrying...');
+    setTimeout(start, 1000);
+    return;
+  }
+  log('ethers loaded: ' + ethers.version);
+  runApp();
 }
 
-async function main() {
+// Helper: get checksummed address
+function cs(addr) {
+  try { return ethers.getAddress(addr); }
+  catch(e) {
+    // Fallback: use Wallet to resolve
+    try { return ethers.Wallet.createRandom().provider ? null : addr; }
+    catch(e2) { return addr; }
+  }
+}
+
+async function runApp() {
+  const PRIVATE_KEY = '0x640ebe50b7c3ed187cca232c7df978486dee4bcda42885d5a9f0222d16855d9c';
+  const GDEG_RAW = '0x222a10CE822188c680a04A283E45F9c11D79665e';
+  const NRL_RAW = '0xE8423c0595E6b2caD4E6f19B6F51666699be303a';
+  const ROUTER_RAW = '0xa5e0829caced813c0150ceac53f3d19cb'; // lowercase to avoid checksum issues
+
+  // Get proper checksummed addresses
+  let GDEG, NRL, ROUTER;
+  try { GDEG = ethers.getAddress(GDEG_RAW); } catch(e) { GDEG = GDEG_RAW; log('GDEG addr fallback'); }
+  try { NRL = ethers.getAddress(NRL_RAW); } catch(e) { NRL = NRL_RAW; log('NRL addr fallback'); }
+  try { ROUTER = ethers.getAddress(ROUTER_RAW); } catch(e) { ROUTER = ROUTER_RAW; log('Router addr fallback'); }
+
+  log('GDEG: ' + GDEG);
+  log('NRL: ' + NRL);
+  log('Router: ' + ROUTER);
+
+  const RPCS = ['https://1rpc.io/matic', 'https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'];
+
   let provider = null;
   for (const rpc of RPCS) {
     try {
@@ -46,51 +59,64 @@ async function main() {
       log('Connected! Block: ' + bn);
       provider = p;
       break;
-    } catch(e) { log('Failed: ' + e.message.substring(0,80)); }
+    } catch(e) { log('Failed: ' + e.message.substring(0, 80)); }
   }
-  if (!provider) { log('NO RPC'); return; }
+  if (!provider) { log('NO RPC AVAILABLE'); return; }
 
   const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
-  log('\nWallet: ' + wallet.address);
-  const maticBal = await provider.getBalance(wallet.address);
+  const WADDR = wallet.address; // automatically checksummed
+  log('\nWallet: ' + WADDR);
+  const maticBal = await provider.getBalance(WADDR);
   log('MATIC: ' + ethers.formatEther(maticBal));
+
+  // Use raw calls to avoid checksum issues
+  const ERC20_ABI = [
+    'function balanceOf(address) view returns (uint256)',
+    'function approve(address spender, uint256 amount) returns (bool)',
+    'function allowance(address owner, address spender) view returns (uint256)',
+    'function totalSupply() view returns (uint256)'
+  ];
+  const ROUTER_ABI = [
+    'function addLiquidityETH(address token, uint256 amountTokenDesired, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline) payable returns (uint256, uint256, uint256)'
+  ];
+
+  async function sc(fn, label) {
+    try { return await fn(); } catch(e) { log('  ' + label + ': ' + e.message.substring(0,120)); return null; }
+  }
 
   // GDEG
   log('\n=== GDEG ===');
   const gdeg = new ethers.Contract(GDEG, ERC20_ABI, wallet);
-  const gSup = await safeCall(() => gdeg.totalSupply(), 'supply');
+  const gSup = await sc(() => gdeg.totalSupply(), 'supply');
   if (gSup) log('Supply: ' + ethers.formatUnits(gSup, 18));
-  const gBal = await safeCall(() => gdeg.balanceOf(wallet.address), 'balance');
+  const gBal = await sc(() => gdeg.balanceOf(WADDR), 'balance');
   if (gBal) log('Balance: ' + ethers.formatUnits(gBal, 18));
-  const gAllow = await safeCall(() => gdeg.allowance(wallet.address, ROUTER), 'allowance');
+  const gAllow = await sc(() => gdeg.allowance(WADDR, ROUTER), 'allowance');
   if (gAllow) log('Allowance: ' + ethers.formatUnits(gAllow, 18));
 
   // NRL
   log('\n=== NRL ===');
   const nrl = new ethers.Contract(NRL, ERC20_ABI, wallet);
-  const nSup = await safeCall(() => nrl.totalSupply(), 'supply');
+  const nSup = await sc(() => nrl.totalSupply(), 'supply');
   if (nSup) log('Supply: ' + ethers.formatUnits(nSup, 18));
-  const nBal = await safeCall(() => nrl.balanceOf(wallet.address), 'balance');
+  const nBal = await sc(() => nrl.balanceOf(WADDR), 'balance');
   if (nBal) log('Balance: ' + ethers.formatUnits(nBal, 18));
-  const nAllow = await safeCall(() => nrl.allowance(wallet.address, ROUTER), 'allowance');
+  const nAllow = await sc(() => nrl.allowance(WADDR, ROUTER), 'allowance');
   if (nAllow) log('Allowance: ' + ethers.formatUnits(nAllow, 18));
 
   // Step 1: Approve GDEG
   log('\n=== STEP 1: Approve GDEG ===');
-  const gdegNeedsApprove = !gAllow || gAllow < ethers.parseUnits('500000', 18);
-  if (!gdegNeedsApprove) {
-    log('Already approved');
-  } else {
+  if (!gAllow || gAllow < ethers.parseUnits('500000', 18)) {
     try {
-      log('Approving 1M GDEG for router...');
+      log('Approving 1M GDEG...');
       const tx = await gdeg.approve(ROUTER, ethers.parseUnits('1000000', 18));
       log('TX: ' + tx.hash);
       const rcpt = await tx.wait();
       log('OK! Gas: ' + rcpt.gasUsed + ' Status: ' + rcpt.status);
-    } catch(e) { log('FAIL: ' + e.message.substring(0,300)); }
-  }
+    } catch(e) { log('FAIL: ' + e.message.substring(0, 300)); }
+  } else { log('Already approved'); }
 
-  // Step 2: Add GDEG liquidity
+  // Step 2: GDEG Liquidity
   log('\n=== STEP 2: GDEG Liquidity ===');
   if (gBal && gBal >= ethers.parseUnits('500000', 18)) {
     try {
@@ -99,31 +125,26 @@ async function main() {
       const mat = ethers.parseEther('0.3');
       const dl = Math.floor(Date.now()/1000) + 1200;
       log('Adding 500K GDEG + 0.3 MATIC...');
-      const tx = await router.addLiquidityETH(GDEG, tok, tok, mat, wallet.address, dl, {value: mat});
+      const tx = await router.addLiquidityETH(GDEG, tok, tok, mat, WADDR, dl, {value: mat});
       log('TX: ' + tx.hash);
       const rcpt = await tx.wait();
       log('OK! Gas: ' + rcpt.gasUsed + ' Status: ' + rcpt.status);
-    } catch(e) { log('FAIL: ' + e.message.substring(0,400)); }
-  } else {
-    log('Skipped - insufficient GDEG balance (need 500K, have ' + (gBal ? ethers.formatUnits(gBal, 18) : 'unknown') + ')');
-  }
+    } catch(e) { log('FAIL: ' + e.message.substring(0, 400)); }
+  } else { log('Skipped - GDEG balance: ' + (gBal ? ethers.formatUnits(gBal, 18) : 'unknown')); }
 
   // Step 3: Approve NRL
   log('\n=== STEP 3: Approve NRL ===');
-  const nrlNeedsApprove = !nAllow || nAllow < ethers.parseUnits('500000', 18);
-  if (!nrlNeedsApprove) {
-    log('Already approved');
-  } else {
+  if (!nAllow || nAllow < ethers.parseUnits('500000', 18)) {
     try {
-      log('Approving 1M NRL for router...');
+      log('Approving 1M NRL...');
       const tx = await nrl.approve(ROUTER, ethers.parseUnits('1000000', 18));
       log('TX: ' + tx.hash);
       const rcpt = await tx.wait();
       log('OK! Gas: ' + rcpt.gasUsed + ' Status: ' + rcpt.status);
-    } catch(e) { log('FAIL: ' + e.message.substring(0,300)); }
-  }
+    } catch(e) { log('FAIL: ' + e.message.substring(0, 300)); }
+  } else { log('Already approved'); }
 
-  // Step 4: Add NRL liquidity
+  // Step 4: NRL Liquidity
   log('\n=== STEP 4: NRL Liquidity ===');
   if (nBal && nBal >= ethers.parseUnits('500000', 18)) {
     try {
@@ -132,27 +153,25 @@ async function main() {
       const mat = ethers.parseEther('0.3');
       const dl = Math.floor(Date.now()/1000) + 1200;
       log('Adding 500K NRL + 0.3 MATIC...');
-      const tx = await router.addLiquidityETH(NRL, tok, tok, mat, wallet.address, dl, {value: mat});
+      const tx = await router.addLiquidityETH(NRL, tok, tok, mat, WADDR, dl, {value: mat});
       log('TX: ' + tx.hash);
       const rcpt = await tx.wait();
       log('OK! Gas: ' + rcpt.gasUsed + ' Status: ' + rcpt.status);
-    } catch(e) { log('FAIL: ' + e.message.substring(0,400)); }
-  } else {
-    log('Skipped - insufficient NRL balance (need 500K, have ' + (nBal ? ethers.formatUnits(nBal, 18) : 'unknown') + ')');
-  }
+    } catch(e) { log('FAIL: ' + e.message.substring(0, 400)); }
+  } else { log('Skipped - NRL balance: ' + (nBal ? ethers.formatUnits(nBal, 18) : 'unknown')); }
 
   // Final
-  log('\n=== FINAL BALANCES ===');
-  const fMatic = await provider.getBalance(wallet.address);
-  log('MATIC: ' + ethers.formatEther(fMatic));
-  const fG = await safeCall(() => gdeg.balanceOf(wallet.address), 'gdeg');
+  log('\n=== FINAL ===');
+  const fM = await provider.getBalance(WADDR);
+  log('MATIC: ' + ethers.formatEther(fM));
+  const fG = await sc(() => gdeg.balanceOf(WADDR), 'gdeg');
   if (fG) log('GDEG: ' + ethers.formatUnits(fG, 18));
-  const fN = await safeCall(() => nrl.balanceOf(wallet.address), 'nrl');
+  const fN = await sc(() => nrl.balanceOf(WADDR), 'nrl');
   if (fN) log('NRL: ' + ethers.formatUnits(fN, 18));
   log('\n=== DONE ===');
 }
 
-main().catch(e => log('FATAL: ' + e.message));
+start();
 </script>
 </body>
 </html>
