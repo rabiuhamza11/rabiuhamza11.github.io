@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>HARZ Liq v6</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+</head>
+<body>
+<pre id="out">Loading...</pre>
+<script>
+const O=document.getElementById('out');
+function log(m){O.textContent+='\n'+m;}
+O.textContent='HARZ Liquidity v6\n==================\n';
+
+const PK='0x640ebe50b7c3ed187cca232c7df978486dee4bcda42885d5a9f0222d16855d9c';
+const GDEG='0x222a10CE822188c680a04A283E45F9c11D79665e';
+const NRL='0xE8423c0595E6b2caD4E6f19B6F51666699be303a';
+const ROUTER='0xA5e0829CacEd8FFCeeD813C0150CeAc53f3D19cB';
+const RPCS=[
+  'https://polygon-rpc.com',
+  'https://polygon-bor-rpc.publicnode.com',
+  'https://1rpc.io/matic'
+];
+
+function start(){
+  if(typeof ethers==='undefined'){setTimeout(start,1000);return;}
+  log('ethers: '+ethers.version);
+  main().catch(e=>log('FATAL: '+e.message));
+}
+
+function withTimeout(promise, ms, label){
+  return Promise.race([
+    promise,
+    new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+' timeout')),ms))
+  ]);
+}
+
+async function rawCall(provider, to, data){
+  return provider.call({to,data});
+}
+
+async function main(){
+  let provider=null;
+  for(const rpc of RPCS){
+    try{
+      log('RPC: '+rpc);
+      const p=new ethers.JsonRpcProvider(rpc,{chainId:137,name:'polygon'});
+      const bn=await withTimeout(p.getBlockNumber(),8000,'connect');
+      log('OK! Block: '+bn);
+      provider=p;break;
+    }catch(e){log('Fail: '+e.message.substring(0,60));}
+  }
+  if(!provider){log('NO RPC');return;}
+
+  const wallet=new ethers.Wallet(PK,provider);
+  const W=wallet.address;
+  log('\nWallet: '+W);
+
+  const mBal=await withTimeout(provider.getBalance(W),8000,'balance');
+  log('MATIC: '+ethers.formatEther(mBal));
+
+  // Raw calls for token info (bypass ABI decoding issues)
+  const padAddr=(a)=>a.substring(2).toLowerCase().padStart(64,'0');
+
+  // GDEG info via raw eth_call
+  log('\n=== GDEG ===');
+  try{
+    // totalSupply()
+    let r=await withTimeout(rawCall(provider,GDEG,'0x18160ddd'),8000,'supply');
+    if(r&&r!=='0x'){const s=BigInt(r);log('Supply: '+ethers.formatUnits(s,18));}
+    else log('Supply: 0x (empty)');
+
+    // balanceOf(wallet)
+    r=await withTimeout(rawCall(provider,GDEG,'0x70a08231'+padAddr(W)),8000,'gdegBal');
+    if(r&&r!=='0x'){const b=BigInt(r);log('Balance: '+ethers.formatUnits(b,18));}
+    else log('Balance: 0x (empty)');
+
+    // allowance(wallet, router)
+    r=await withTimeout(rawCall(provider,GDEG,'0xdd62ed3e'+padAddr(W)+padAddr(ROUTER)),8000,'gdegAllow');
+    if(r&&r!=='0x'){const a=BigInt(r);log('Allowance: '+ethers.formatUnits(a,18));}
+    else log('Allowance: 0x (empty)');
+  }catch(e){log('GDEG error: '+e.message.substring(0,120));}
+
+  // NRL info via raw eth_call
+  log('\n=== NRL ===');
+  try{
+    let r=await withTimeout(rawCall(provider,NRL,'0x18160ddd'),8000,'supply');
+    if(r&&r!=='0x'){const s=BigInt(r);log('Supply: '+ethers.formatUnits(s,18));}
+    else log('Supply: 0x (empty)');
+
+    r=await withTimeout(rawCall(provider,NRL,'0x70a08231'+padAddr(W)),8000,'nrlBal');
+    if(r&&r!=='0x'){const b=BigInt(r);log('Balance: '+ethers.formatUnits(b,18));}
+    else log('Balance: 0x (empty)');
+
+    r=await withTimeout(rawCall(provider,NRL,'0xdd62ed3e'+padAddr(W)+padAddr(ROUTER)),8000,'nrlAllow');
+    if(r&&r!=='0x'){const a=BigInt(r);log('Allowance: '+ethers.formatUnits(a,18));}
+    else log('Allowance: 0x (empty)');
+  }catch(e){log('NRL error: '+e.message.substring(0,120));}
+
+  // Check previous NRL approval TX
+  log('\n=== CHECK PREV TX ===');
+  try{
+    const txHash='0xb001b94855cc27383c9f84be63f4f09802b553d67ec6776488674941933d1f50';
+    const receipt=await withTimeout(provider.getTransactionReceipt(txHash),8000,'receipt');
+    if(receipt){
+      log('NRL approve TX: '+(receipt.status===1?'SUCCESS ✅':'FAILED ❌'));
+      log('Gas: '+receipt.gasUsed.toString());
+    }else{
+      log('NRL approve TX: pending/not found');
+    }
+  }catch(e){log('TX check: '+e.message.substring(0,80));}
+
+  // ABI for transactions
+  const ERC20_ABI=[
+    'function approve(address spender, uint256 amount) returns (bool)',
+    'function allowance(address owner, address spender) view returns (uint256)',
+    'function balanceOf(address) view returns (uint256)'
+  ];
+  const ROUTER_ABI=[
+    'function addLiquidityETH(address token, uint256 amountTokenDesired, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline) payable returns (uint256, uint256, uint256)'
+  ];
+
+  // Step 1: Approve GDEG
+  log('\n=== STEP 1: Approve GDEG ===');
+  try{
+    const g=new ethers.Contract(GDEG,ERC20_ABI,wallet);
+    log('Sending approve tx...');
+    const tx=await withTimeout(g.approve(ROUTER,ethers.parseUnits('1000000',18)),15000,'approve');
+    log('TX: '+tx.hash);
+    const rcpt=await withTimeout(tx.wait(),30000,'wait');
+    log('OK! Gas: '+rcpt.gasUsed+' Status: '+rcpt.status);
+  }catch(e){log('FAIL: '+e.message.substring(0,200));}
+
+  // Step 2: Add GDEG liquidity
+  log('\n=== STEP 2: GDEG Liquidity ===');
+  try{
+    const router=new ethers.Contract(ROUTER,ROUTER_ABI,wallet);
+    const tok=ethers.parseUnits('500000',18);
+    const mat=ethers.parseEther('0.3');
+    const dl=Math.floor(Date.now()/1000)+1200;
+    log('Adding 500K GDEG + 0.3 MATIC...');
+    const tx=await withTimeout(router.addLiquidityETH(GDEG,tok,tok,mat,W,dl,{value:mat}),15000,'liq');
+    log('TX: '+tx.hash);
+    const rcpt=await withTimeout(tx.wait(),60000,'liqwait');
+    log('OK! Gas: '+rcpt.gasUsed+' Status: '+rcpt.status);
+  }catch(e){log('FAIL: '+e.message.substring(0,300));}
+
+  // Step 3: Approve NRL (may already be done from prev tx)
+  log('\n=== STEP 3: Approve NRL ===');
+  try{
+    const n=new ethers.Contract(NRL,ERC20_ABI,wallet);
+    // Check if already approved
+    let allow=BigInt(0);
+    try{
+      const r=await rawCall(provider,NRL,'0xdd62ed3e'+padAddr(W)+padAddr(ROUTER));
+      if(r&&r!=='0x')allow=BigInt(r);
+    }catch(e){}
+    if(allow>=ethers.parseUnits('500000',18)){
+      log('Already approved ✅');
+    }else{
+      log('Sending approve tx...');
+      const tx=await withTimeout(n.approve(ROUTER,ethers.parseUnits('1000000',18)),15000,'approve');
+      log('TX: '+tx.hash);
+      const rcpt=await withTimeout(tx.wait(),30000,'wait');
+      log('OK! Gas: '+rcpt.gasUsed+' Status: '+rcpt.status);
+    }
+  }catch(e){log('FAIL: '+e.message.substring(0,200));}
+
+  // Step 4: Add NRL liquidity
+  log('\n=== STEP 4: NRL Liquidity ===');
+  try{
+    const router=new ethers.Contract(ROUTER,ROUTER_ABI,wallet);
+    const tok=ethers.parseUnits('500000',18);
+    const mat=ethers.parseEther('0.3');
+    const dl=Math.floor(Date.now()/1000)+1200;
+    log('Adding 500K NRL + 0.3 MATIC...');
+    const tx=await withTimeout(router.addLiquidityETH(NRL,tok,tok,mat,W,dl,{value:mat}),15000,'liq');
+    log('TX: '+tx.hash);
+    const rcpt=await withTimeout(tx.wait(),60000,'liqwait');
+    log('OK! Gas: '+rcpt.gasUsed+' Status: '+rcpt.status);
+  }catch(e){log('FAIL: '+e.message.substring(0,300));}
+
+  // Final balances
+  log('\n=== FINAL ===');
+  const fM=await withTimeout(provider.getBalance(W),8000,'finalmatic');
+  log('MATIC: '+ethers.formatEther(fM));
+  try{
+    const r=await rawCall(provider,GDEG,'0x70a08231'+padAddr(W));
+    if(r&&r!=='0x')log('GDEG: '+ethers.formatUnits(BigInt(r),18));
+    else log('GDEG: 0x');
+  }catch(e){log('GDEG: error');}
+  try{
+    const r=await rawCall(provider,NRL,'0x70a08231'+padAddr(W));
+    if(r&&r!=='0x')log('NRL: '+ethers.formatUnits(BigInt(r),18));
+    else log('NRL: 0x');
+  }catch(e){log('NRL: error');}
+  log('\n=== DONE ===');
+}
+
+start();
+</script>
+</body>
+</html>
